@@ -1,5 +1,17 @@
 # Release History
 
+## 2.0.0b3 (Unreleased)
+
+### Features Added
+
+- Receipt verification is now crypto-agile. Signature verification selects the
+  scheme from the node/service certificate's public key type instead of assuming
+  ECDSA, and certificate loading no longer rejects non-Elliptic-Curve keys. ECDSA
+  (the algorithm used by Confidential Ledger today) behaves exactly as before, RSA
+  node identities are now also supported, and an unsupported key type fails with a
+  clear, actionable error. This is a prerequisite for verifying future
+  post-quantum (for example ML-DSA / FIPS 204) receipts.
+
 ## 2.0.0b2 (2026-01-29)
 
 ### Bugs Fixed

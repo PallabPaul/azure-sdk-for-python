@@ -361,3 +361,70 @@ def test_receipt_verification_with_invalid_application_claims_throws_exception(
         ValueError,
     ):
         verify_receipt(input_receipt, input_service_cert, application_claims=input_claims)
+
+
+# --- Crypto-agility tests ---------------------------------------------------
+# These verify that receipt verification is not hard-coded to ECDSA: supported
+# key types (EC, RSA) are accepted, while unsupported key types (for example a
+# future post-quantum identity, here simulated with Ed25519) fail loudly with a
+# clear, actionable error instead of an opaque crash.
+
+import datetime
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
+from cryptography.hazmat.primitives.serialization import Encoding
+from cryptography.x509.oid import NameOID
+
+from azure.confidentialledger.receipt._receipt_verification import (
+    _load_and_verify_pem_certificate,
+    _verify_signature,
+)
+
+
+def _make_self_signed_pem(private_key, signing_hash) -> str:
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "pqc-test")])
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime(2020, 1, 1))
+        .not_valid_after(datetime.datetime(2050, 1, 1))
+    )
+    cert = builder.sign(private_key, signing_hash)
+    return cert.public_bytes(Encoding.PEM).decode()
+
+
+def test_load_certificate_accepts_ec_and_rsa_keys():
+    # EC (the algorithm used today) must continue to load.
+    ec_pem = _make_self_signed_pem(ec.generate_private_key(ec.SECP384R1()), hashes.SHA384())
+    assert _load_and_verify_pem_certificate(ec_pem) is not None
+
+    # RSA must now also load (previously rejected by the EC-only assertion).
+    rsa_pem = _make_self_signed_pem(rsa.generate_private_key(public_exponent=65537, key_size=2048), hashes.SHA256())
+    assert _load_and_verify_pem_certificate(rsa_pem) is not None
+
+
+def test_load_certificate_rejects_unsupported_key_type():
+    # Ed25519 stands in for a not-yet-supported (for example post-quantum) key
+    # type: loading must fail clearly rather than silently.
+    ed_pem = _make_self_signed_pem(ed25519.Ed25519PrivateKey.generate(), None)
+    with pytest.raises(ValueError):
+        _load_and_verify_pem_certificate(ed_pem)
+
+
+def test_verify_signature_unsupported_key_type_gives_actionable_error():
+    ed_key = ed25519.Ed25519PrivateKey.generate()
+    ed_pem = _make_self_signed_pem(ed_key, None)
+    cert = x509.load_pem_x509_certificate(ed_pem.encode())
+
+    with pytest.raises(ValueError) as exc_info:
+        _verify_signature(cert, b"signature", b"data", hashes.SHA256())
+
+    # Error should name the unsupported type and point at the PQ upgrade path.
+    message = str(exc_info.value)
+    assert "Unsupported public key type" in message
+    assert "ML-DSA" in message

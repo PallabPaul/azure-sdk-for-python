@@ -12,7 +12,7 @@ from typing import Dict, List, Any, cast, Optional
 
 from cryptography.x509 import load_pem_x509_certificate, Certificate
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec, utils
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa, utils
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from azure.confidentialledger.receipt._receipt_models import (
@@ -180,8 +180,10 @@ def _verify_signature_over_root_node_hash(
         if node_id is not None:
             assert sha256(public_key_bytes).digest() == bytes.fromhex(node_id)
 
-        # Verify signature over root node hash using node certificate public key
-        _verify_ec_signature(
+        # Verify signature over root node hash using node certificate public key.
+        # The signature scheme is selected from the certificate's key type by
+        # _verify_signature, so this path is not tied to a single algorithm.
+        _verify_signature(
             node_cert,
             b64decode(signature, validate=True),
             root_node_hash,
@@ -288,7 +290,7 @@ def _verify_certificate_endorsement(endorsee: Certificate, endorser: Certificate
         cert_digest = digester.finalize()
 
         # Verify endorser signature over endorsee certificate digest
-        _verify_ec_signature(endorser, endorsee.signature, cert_digest, hash_algorithm)
+        _verify_signature(endorser, endorsee.signature, cert_digest, hash_algorithm)
 
     except Exception as exception:
         raise ValueError(
@@ -296,7 +298,7 @@ def _verify_certificate_endorsement(endorsee: Certificate, endorser: Certificate
         ) from exception
 
 
-def _verify_ec_signature(
+def _verify_signature(
     certificate: Certificate,
     signature: bytes,
     data: bytes,
@@ -304,19 +306,42 @@ def _verify_ec_signature(
 ) -> None:
     """Verify a signature over data using the certificate public key.
 
+    The verification scheme is chosen from the type of public key contained in
+    the certificate instead of being hard-coded to a single algorithm. This
+    keeps receipt verification crypto-agile: ECDSA and RSA node identities are
+    supported today, and additional key types (for example post-quantum ML-DSA
+    identities) can be added here without changing any caller.
+
     :param Certificate certificate: Certificate
     :param bytes signature: Signature
-    :param bytes data: Data
-    :param hashes.HashAlgorithm hash_algorithm: Hash algorithm
+    :param bytes data: Data, already hashed with ``hash_algorithm``
+    :param hashes.HashAlgorithm hash_algorithm: Hash algorithm used to prehash data
+    :raises ValueError: If the certificate public key type is not supported.
     """
 
-    public_key = cast(ec.EllipticCurvePublicKey, certificate.public_key())
+    public_key = certificate.public_key()
 
-    public_key.verify(
-        signature,
-        data,
-        ec.ECDSA(utils.Prehashed(hash_algorithm)),
-    )
+    if isinstance(public_key, ec.EllipticCurvePublicKey):
+        public_key.verify(
+            signature,
+            data,
+            ec.ECDSA(utils.Prehashed(hash_algorithm)),
+        )
+    elif isinstance(public_key, rsa.RSAPublicKey):
+        public_key.verify(
+            signature,
+            data,
+            padding.PKCS1v15(),
+            utils.Prehashed(hash_algorithm),
+        )
+    else:
+        raise ValueError(
+            "Unsupported public key type for receipt signature verification: "
+            f"'{type(public_key).__name__}'. Confidential Ledger receipt "
+            "verification currently supports ECDSA and RSA node identities. "
+            "Post-quantum identities (for example ML-DSA / FIPS 204) require an "
+            "updated azure-confidentialledger release."
+        )
 
 
 def _verify_node_cert_endorsed_by_service_cert(
@@ -354,9 +379,16 @@ def _verify_node_cert_endorsed_by_service_cert(
         current_cert = endorsement_cert
 
 
+# Public key types currently supported for receipt verification. ECDSA is the
+# algorithm used by Confidential Ledger node and service identities today; RSA
+# is accepted for agility. New key types (for example post-quantum ML-DSA) must
+# be added both here and in ``_verify_signature``.
+_SUPPORTED_PUBLIC_KEY_TYPES = (ec.EllipticCurvePublicKey, rsa.RSAPublicKey)
+
+
 def _load_and_verify_pem_certificate(cert_str: str) -> Certificate:
     """Load PEM certificate from a string representation and verify it is a
-    valid certificate with expected Elliptic Curve public key.
+    valid certificate with a supported public key type.
 
     :param str cert_str: PEM certificate string
     :return: Certificate
@@ -367,8 +399,10 @@ def _load_and_verify_pem_certificate(cert_str: str) -> Certificate:
         # Load certificate from string
         cert = load_pem_x509_certificate(cert_str.encode())
 
-        # Verify public key is of the correct type
-        assert isinstance(cert.public_key(), ec.EllipticCurvePublicKey)
+        # Verify the public key is of a type we know how to verify against.
+        # This is intentionally not limited to a single algorithm so the
+        # verifier stays crypto-agile as new key types are introduced.
+        assert isinstance(cert.public_key(), _SUPPORTED_PUBLIC_KEY_TYPES)
 
         return cert
 
