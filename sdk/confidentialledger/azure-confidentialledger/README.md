@@ -83,6 +83,8 @@ ledger_client = ConfidentialLedgerClient(
 
 To make it clear that a file is being used for the ledger TLS certificate, subsequent examples will explicitly write the ledger TLS certificate to a file.
 
+Hybrid ML-KEM TLS negotiation depends on the Python distribution, operating system, and OpenSSL provider rather than this client package alone. See the [runtime qualification matrix](https://github.com/Azure/azure-sdk-for-python/blob/main/sdk/confidentialledger/azure-confidentialledger/tests/HYBRID_TLS_SUPPORT.md) before making a PQ TLS support claim.
+
 ## Key concepts
 ### Ledger entries and transactions
 Every write to Azure Confidential Ledger generates an immutable ledger entry in the service. Writes, also referred to as transactions, are uniquely identified by transaction ids that increment with each write. Once written, ledger entries may be retrieved at any time.
